@@ -66,6 +66,14 @@ public class Schema implements Resource {
 		return null;
 	}
 	
+	public Field getField(String name, Boolean casesensetive) {
+		if (casesensetive) return getField(name);
+		name = name.toLowerCase();
+		for (Field field : _fields)
+			if (field.getName().toLowerCase().equals(name)) 
+				return field;
+		return null;
+	}
 	public void addField(Field field) {
 		field.setTable(_table);
 		_fields.add(field);

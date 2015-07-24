@@ -398,6 +398,7 @@ public class CyclistNumberAxis extends ValueAxis<Number> {
             double maxReqTickGap = 0;
             double last = 0;
             count = 0;
+            
             for (double major = minRounded; major <= maxRounded; major += tickUnitRounded, count ++)  {
                 double size = (vertical) ? measureTickMarkSize((Double)major, getTickLabelRotation(), rangeIndex).getHeight() :
                                             measureTickMarkSize((Double)major, getTickLabelRotation(), rangeIndex).getWidth();
@@ -405,6 +406,10 @@ public class CyclistNumberAxis extends ValueAxis<Number> {
                     last = size/2;
                 } else {
                     maxReqTickGap = Math.max(maxReqTickGap, last + 6 + (size/2) );
+                }
+                if (minRounded == maxRounded) {
+                	maxReqTickGap = Math.max(maxReqTickGap, last + 6 + (size/2) );
+                	break;
                 }
             }
             reqLength = (count-1) * maxReqTickGap;

@@ -49,6 +49,7 @@ public class SimulationTablesPostProcessor {
 																					"EnterTime INTEGER,"+
 																					"ExitTime INTEGER,"+
 																					"Lifetime INTEGER)";
+	
 	private static final String FACILITIES_TABLE_UPDATE = "replace into Facilities(SimID,AgentId,Spec,Prototype,InstitutionId,RegionId,EnterTime,ExitTime,Lifetime) "+
 														  "select f.SimId, f.AgentId, f.Spec, f.Prototype, i.AgentId, " +
 														  "cast(-1 as INTEGER), f.EnterTime, f.ExitTime, f.Lifetime from Agents as f, Agents as i " +
@@ -69,7 +70,8 @@ public class SimulationTablesPostProcessor {
 								   + "		INNER JOIN Compositions AS cmp ON cmp.QualId = inv.QualId "
 								   + "	WHERE "
 								   + "		inv.SimId = cmp.SimId AND inv.SimId = ag.SimId and tl.SimId=inv.SimId "
-								   + "	GROUP BY inv.SimId, tl.Time, cmp.NucId, ag.AgentID;";
+								   + "	GROUP BY inv.SimId, tl.Time, cmp.NucId, ag.AgentID; "
+								   + "CREATE INDEX IF NOT EXISTS QuantityInventoryBase_idx ON QuantityInventoryBase (simid,agentid,time,nucid,quantity)";
 	
 	private static final String QUANTITY_INVENTORY_VIEW_CREATE = 
 								  "CREATE view if not exists  QuantityInventory as "
@@ -92,7 +94,9 @@ public class SimulationTablesPostProcessor {
 								+ "	WHERE "
 								+ "		tr.SimId = res.SimId AND ag.SimId = tr.SimId and cmp.SimId=res.SimId "
 							    + "	GROUP BY res.SimId, cmp.NucId, tr.Time, ag.AgentID"
-								+ "	ORDER BY tr.Time ASC;";
+								+ "	ORDER BY tr.Time ASC;"
+							    + " CREATE INDEX IF NOT EXISTS QuantityTransactedBase_idx ON QuantityTransactedBase (simid,agentid,time,nucid,quantity); ";
+
 	
 	private static final String QUANTITY_TRANSACTED_VIEW_CREATE = 
 			  "CREATE view if not exists QuantityTransacted as "
@@ -105,16 +109,20 @@ public class SimulationTablesPostProcessor {
 	
 	private QueryOperation[] UpdateTablesRunningOrderTbl = 
 		{
-			 new QueryOperation("Fix \"Agents\" table phase #1",FIX_AGENTS_TABLE_PHASE1),
-		     new QueryOperation("Fix \"Agents\" table phase #2",FIX_AGENTS_TABLE_PHASE2),
-		     new QueryOperation("Create \"Facilitites\" table",FACILITIES_TABLE_CREATE),
-		     new QueryOperation("Update \"Facilitites\" table",FACILITIES_TABLE_UPDATE),
-		     new QueryOperation("Create \"Facilitites\" index",FACILITIES_TABLE_INDEX),
-		     new QueryOperation("Create base table \"QuantityInventoryBase\"",QUANTITY_INVENTORY_BASE_CREATE),
-		     new QueryOperation("Create view \"QuantityInventory\"",QUANTITY_INVENTORY_VIEW_CREATE),
-		     new QueryOperation("Create base table \"QuantityTransactedBase\"",QUANTITY_TRANSACTED_BASE_CREATE),
-		     new QueryOperation("Create view \"QuantityTransacted\"",QUANTITY_TRANSACTED_VIEW_CREATE),
-		     new QueryOperation("Create table \"UpdatedIndication\"",UPDATED_INDICATION_TABLE_CREATE)
+			 new QueryOperation("Fix Agents table phase #1",FIX_AGENTS_TABLE_PHASE1),
+		     new QueryOperation("Fix Agents table phase #2",FIX_AGENTS_TABLE_PHASE2),
+		     
+		     new QueryOperation("Create Facilitites table",FACILITIES_TABLE_CREATE),
+		     new QueryOperation("Update Facilitites table",FACILITIES_TABLE_UPDATE),
+		     new QueryOperation("Create Facilitites index",FACILITIES_TABLE_INDEX),
+		     
+		     new QueryOperation("Create base table QuantityInventoryBase",QUANTITY_INVENTORY_BASE_CREATE),
+		     new QueryOperation("Create view QuantityInventory",QUANTITY_INVENTORY_VIEW_CREATE),
+		     
+		     new QueryOperation("Create base table QuantityTransactedBase",QUANTITY_TRANSACTED_BASE_CREATE),
+		     new QueryOperation("Create view QuantityTransacted",QUANTITY_TRANSACTED_VIEW_CREATE),
+		     
+		     new QueryOperation("Create table UpdatedIndication",UPDATED_INDICATION_TABLE_CREATE)
 		};
 	
 	private static final Map<String,String> applicationsMap;
@@ -410,7 +418,7 @@ public class SimulationTablesPostProcessor {
 			}
 			return true;
 		} catch (SQLException e) {
-			log.warn("Create additional table failed");
+			log.warn("Create additional table failed:", e);
 			return false;
 		}finally{
 			try {

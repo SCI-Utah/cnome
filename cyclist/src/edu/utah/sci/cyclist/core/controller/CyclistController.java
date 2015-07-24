@@ -29,6 +29,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.Reader;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -45,8 +48,8 @@ import javafx.collections.ObservableList;
 import javafx.event.ActionEvent;
 import javafx.event.EventHandler;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.Tab;
 import javafx.stage.DirectoryChooser;
-import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import javafx.stage.WindowEvent;
 
@@ -60,6 +63,7 @@ import edu.utah.sci.cyclist.core.model.Context;
 import edu.utah.sci.cyclist.core.model.CyclistDatasource;
 import edu.utah.sci.cyclist.core.model.Field;
 import edu.utah.sci.cyclist.core.model.Model;
+import edu.utah.sci.cyclist.core.model.Perspective;
 import edu.utah.sci.cyclist.core.model.Preferences;
 import edu.utah.sci.cyclist.core.model.Simulation;
 import edu.utah.sci.cyclist.core.model.Table;
@@ -68,21 +72,19 @@ import edu.utah.sci.cyclist.core.presenter.InputPresenter;
 import edu.utah.sci.cyclist.core.presenter.SchemaPresenter;
 import edu.utah.sci.cyclist.core.presenter.SimulationPresenter;
 import edu.utah.sci.cyclist.core.presenter.ToolsPresenter;
-import edu.utah.sci.cyclist.core.presenter.WorkspacePresenter;
+import edu.utah.sci.cyclist.core.presenter.VisWorkspacePresenter;
 import edu.utah.sci.cyclist.core.services.CyclusService;
 import edu.utah.sci.cyclist.core.tools.ToolFactory;
 import edu.utah.sci.cyclist.core.ui.MainScreen;
+import edu.utah.sci.cyclist.core.ui.components.ViewBase;
 import edu.utah.sci.cyclist.core.ui.panels.JobsPanel;
-import edu.utah.sci.cyclist.core.ui.views.Workspace;
+import edu.utah.sci.cyclist.core.ui.views.VisWorkspace;
 import edu.utah.sci.cyclist.core.ui.wizards.DatatableWizard;
-import edu.utah.sci.cyclist.core.ui.wizards.ManageRemoteServersWizard;
 import edu.utah.sci.cyclist.core.ui.wizards.PreferencesWizard;
-import edu.utah.sci.cyclist.core.ui.wizards.RemoteServerWizard;
 import edu.utah.sci.cyclist.core.ui.wizards.SaveWsWizard;
 import edu.utah.sci.cyclist.core.ui.wizards.SimulationWizard;
 import edu.utah.sci.cyclist.core.ui.wizards.SqliteLoaderWizard;
 import edu.utah.sci.cyclist.core.util.LoadSqlite;
-import edu.utah.sci.cyclist.core.util.StreamUtils;
 
 
 public class CyclistController {
@@ -91,14 +93,20 @@ public class CyclistController {
 
 	private final EventBus _eventBus;
 	private MainScreen _screen;
-	public static WorkspacePresenter _presenter;
+	public static VisWorkspacePresenter _presenter;
 	private Model _model = new Model();
 	private String SAVE_FILE = "workspace-config.xml";
-	private WorkDirectoryController _workDirectoryController;
+	private SessionController _sessionController;
 	private Boolean _dirtyFlag = false;
     public static CyclusService _cyclusService;
 	
-	private static final String SIMULATIONS_TABLES_FILE = "assets/SimulationTablesDef.xml";
+	private static final String SIMULATIONS_TABLES_FILE = "SimulationTablesDef.xml";
+	
+	private Perspective _perspectives[] = {
+			new Perspective(0, "Scenario Builder", ToolsLibrary.SCENARIO_TOOL, Arrays.asList("Builder", "Jobs")),
+			new Perspective(1, "Data Exploration", ToolsLibrary.VIS_TOOL, Arrays.asList("Simulations", "Tables", "Fields", "Filters", "Jobs"))
+	};
+	private Perspective _currentPerspective = null;
 	
 	/**
 	 * Constructor
@@ -118,20 +126,20 @@ public class CyclistController {
 		// TODO: fix this hack. We need a better way of passing around the list of datasources
 		LoadSqlite.setSources(_model.getSources());
 		
-		_workDirectoryController = new WorkDirectoryController();
+		_sessionController = new SessionController();
 		
 		// If the save directory does not exist, create it
-		File saveDir = new File(WorkDirectoryController.CYCLIST_DIR);
+		File saveDir = new File(SessionController.CYCLIST_DIR);
 		if (!saveDir.exists())	
 			saveDir.mkdir();  
 	
-		File defaultWs = new File(WorkDirectoryController.DEFAULT_WORKSPACE);
+		File defaultWs = new File(SessionController.DEFAULT_WORKSPACE);
 		if (!defaultWs.exists())	
 			defaultWs.mkdir();
 		
-		if (_workDirectoryController.initGeneralConfigFile())
+		if (_sessionController.initGeneralConfigFile())
 		{
-			_workDirectoryController.restoreGeneralConfigFile();
+			_sessionController.restoreGeneralConfigFile();
 		}
 	}
 
@@ -152,6 +160,17 @@ public class CyclistController {
 		ds.setSources(_model.getSources());
 		ds.setTables(_model.getTables());
 		ds.setPanel(screen.getDatasourcesPanel());
+		
+		screen.getDatasourcesPanel().setTableActions(Arrays.asList("Plot"), 
+			action -> { 
+				try {
+					_presenter
+						.addTool(ToolsLibrary.getFactory(action.v1).create())
+						.addTable(action.v2);
+				} catch (Exception e) {
+					log.error("internal error: ",e);
+				}	
+			});
 		
 		// Schema panel
 		SchemaPresenter sp = new SchemaPresenter(_eventBus);
@@ -176,24 +195,72 @@ public class CyclistController {
         // ToolsLibrary panel
         ToolsPresenter tp = new ToolsPresenter(_eventBus);
         tp.setPanel(screen.getToolsPanel());
-        tp.setFactories(Arrays.asList(ToolsLibrary.factories));
+        tp.setFactories(ToolsLibrary.getFactoriesOfType(ToolsLibrary.VIS_TOOL, true));
        
         // InputLibrary panel
         InputPresenter ip = new InputPresenter(_eventBus);
         ip.setPanel(screen.getInputPanel());
-        ip.setFactories(Arrays.asList(ToolsLibrary.inputFactories));
+        ip.setFactories(ToolsLibrary.getFactoriesOfType(ToolsLibrary.SCENARIO_TOOL, true));
         
-		// set up the main workspace
-		Workspace workspace = new Workspace(true);
-//		workspace.setWorkDirPath(getLastChosenWorkDirectory());
-		screen.setWorkspace(workspace);
+        // Builder perspectives
+       
+		for (Perspective p : _perspectives) {
+			ViewBase workspace = new VisWorkspace(true);
+			p.presenter = new VisWorkspacePresenter(_eventBus);
+			p.presenter.setView(workspace);
+
+			Tab tab = new Tab();
+			tab.setText(p.name);
+			tab.setClosable(false);
+			tab.setContent(workspace);
+			screen.getTabPane().getTabs().add(tab);
+			
+//			
+		}
 		
-		_presenter = new WorkspacePresenter(_eventBus);
-		_presenter.setView(workspace);
+		screen.getTabPane().getSelectionModel().selectedIndexProperty().addListener(new ChangeListener<Number>() {
+			@Override
+			public void changed(ObservableValue<? extends Number> o, Number prev, Number id) {
+				perspectiveChanged(id.intValue());
+
+			}
+		});
 		
-		// do something?
-		//selectWorkspace();
 		restore();
+
+		selectPerspective(_currentPerspective.id);   
+		if (_currentPerspective.id == 0)
+			perspectiveChanged(_currentPerspective.id);  
+	}
+	
+	private void selectPerspective(int id) {
+		_screen.getTabPane().getSelectionModel().select(id);
+	}
+	
+	private void perspectiveChanged(int id) {
+		if (_currentPerspective != null && _currentPerspective.id != id) {
+			_currentPerspective.setToolsPositions(_screen.getToolsPositions());
+			_presenter.getWorkspace().getConsole().setActive(false);
+		}
+		
+		_currentPerspective = _perspectives[id];
+		if (!_currentPerspective.initialized) {
+			_currentPerspective.init();
+			if (id == 0) {
+				try {
+					if (!_perspectives[0].presenter.hasTool("Cycic")) {
+						ToolFactory factory = ToolsLibrary.getFactory("Cycic");
+						_perspectives[0].presenter.addTool(factory.create(), 0, 0);	 
+					}
+				} catch (Exception e) {
+					log.error("Can create scenario builder");
+				}
+			}
+		}
+		_presenter = _currentPerspective.presenter;
+		_presenter.getWorkspace().getConsole().setActive(true);
+		_screen.showPanels(_currentPerspective.tools, _currentPerspective.toolsPositions);
+		_screen.selectTools( _currentPerspective.type);
 	}
 	
 	/**
@@ -202,31 +269,24 @@ public class CyclistController {
 	 */
 	public void selectWorkspace() {
 		
-		if(_workDirectoryController == null){
+		if(_sessionController == null){
 			return;
 		}
 		
-		ObservableList<String> selection = _screen.selectWorkspace(_workDirectoryController.getWorkDirectories(),
-																   _workDirectoryController.getLastChosenIndex());
+		ObservableList<String> selection = _screen.selectWorkspace(_sessionController.getWorkDirectories(),
+																   _sessionController.getLastChosenIndex());
 		
 		selection.addListener(new ListChangeListener<String>(){
 
 			@Override
 			public void onChanged(Change<? extends String> list ){
-				if(_workDirectoryController != null){
-					if(_workDirectoryController.handleWorkDirectoriesListChangedEvent(list)){
+				if(_sessionController != null){
+					if(_sessionController.handleWorkDirectoriesListChangedEvent(list)){
 						restore();
 						
 						//Set all the views to match the new tables.
 						ObservableList<Field> emptyList = FXCollections.observableArrayList();
 						_screen.getFieldsPanel().setFields(emptyList);
-						
-//						//Set the workspace to display the new path at the title.
-//						Workspace workspace = _screen.getWorkspace();
-//						if(workspace != null){
-//							workspace.setWorkDirPath(getLastChosenWorkDirectory());
-//						}
-						
 					}
 				}
 				
@@ -292,7 +352,6 @@ public class CyclistController {
 								Simulation sim = simulation.clone();
 								Simulation existingSim = _model.simExists(simulation);
 								if(existingSim==null){
-//									_model.getSimulations().add(sim);
 									newSimulations.add(sim);
 									_dirtyFlag = true;
 								}else if(!existingSim.getAlias().equals(simulation.getAlias())){
@@ -338,7 +397,6 @@ public class CyclistController {
 								Simulation existingSim = _model.simExists(simulation);
 								if(existingSim == null){
 									newSimulations.add(sim);
-//									_model.getSimulations().add(sim);
 									_dirtyFlag = true;
 								}else if(!existingSim.getAlias().equals(simulation.getAlias())){
 									existingSim.setAlias(simulation.getAlias());
@@ -358,80 +416,80 @@ public class CyclistController {
 			}
 		});
 		
-		_screen.onRun().set(new EventHandler<ActionEvent>() {
-			@Override
-			public void handle(ActionEvent event) {
-				String server = "";
-				if(event.getSource() instanceof MenuItem){
-					server = (String) ((MenuItem)event.getSource()).getUserData();
-					if(server.isEmpty()){
-						server = Preferences.getInstance().getDefaultServer();
-					}
-				}
-				FileChooser chooser = new FileChooser();
-				chooser.getExtensionFilters().add( new FileChooser.ExtensionFilter("Cyclus files (*.xml)", "*.xml") );
-				File file = chooser.showOpenDialog(Cyclist.cyclistStage);
-				if (file != null) {
-					_cyclusService.submit(file, server);
-				}
-			}
-		});
+//		_screen.onRun().set(new EventHandler<ActionEvent>() {
+//			@Override
+//			public void handle(ActionEvent event) {
+//				String server = "";
+//				if(event.getSource() instanceof MenuItem){
+//					server = (String) ((MenuItem)event.getSource()).getUserData();
+//					if(server.isEmpty()){
+//						server = Preferences.getInstance().getDefaultServer();
+//					}
+//				}
+//				FileChooser chooser = new FileChooser();
+//				chooser.getExtensionFilters().add( new FileChooser.ExtensionFilter("Cyclus files (*.xml)", "*.xml") );
+//				File file = chooser.showOpenDialog(Cyclist.cyclistStage);
+//				if (file != null) {
+//					_cyclusService.submit(file, server);
+//				}
+//			}
+//		});
 		
-		_screen.onManage().set(new EventHandler<ActionEvent>() {
-			@Override
-			public void handle(ActionEvent event) {
-				ManageRemoteServersWizard wizard = new ManageRemoteServersWizard(_model.getRemoteServersList());
-				ObservableList<String> deletedServers = wizard.show(_screen.getParent().getScene().getWindow());
-				deletedServers.addListener(new ListChangeListener<String>() {
-					@Override
-					public void onChanged(ListChangeListener.Change<? extends String> listChange) {
-						List<MenuItem> items = new ArrayList<MenuItem>();
-						for(String server:listChange.getList()){
-							_model.getRemoteServersList().remove(server);
-							for(MenuItem item : _screen.getRemoteServers()){
-								if(item.getText().equals(server)){
-									items.add(item);
-								}
-							}
-						}
-						for(MenuItem item : items){
-							_screen.getRemoteServers().remove(item);
-						}
-					}
-				});
-				
-			}
-		});
+//		_screen.onManage().set(new EventHandler<ActionEvent>() {
+//			@Override
+//			public void handle(ActionEvent event) {
+//				ManageRemoteServersWizard wizard = new ManageRemoteServersWizard(_model.getRemoteServersList());
+//				ObservableList<String> deletedServers = wizard.show(_screen.getParent().getScene().getWindow());
+//				deletedServers.addListener(new ListChangeListener<String>() {
+//					@Override
+//					public void onChanged(ListChangeListener.Change<? extends String> listChange) {
+//						List<MenuItem> items = new ArrayList<MenuItem>();
+//						for(String server:listChange.getList()){
+//							_model.getRemoteServersList().remove(server);
+//							for(MenuItem item : _screen.getRemoteServers()){
+//								if(item.getText().equals(server)){
+//									items.add(item);
+//								}
+//							}
+//						}
+//						for(MenuItem item : items){
+//							_screen.getRemoteServers().remove(item);
+//						}
+//					}
+//				});
+//				
+//			}
+//		});
 		
-		_screen.onRunOnOther().set(new EventHandler<ActionEvent>() {
-			@Override
-			public void handle(ActionEvent event) {
-				RemoteServerWizard wizard = new RemoteServerWizard();
-				ObjectProperty<String> selection = wizard.show(_screen.getParent().getScene().getWindow());
-				selection.addListener(new ChangeListener<String>(){
-					@Override
-					public void changed(ObservableValue<? extends String> arg0, String oldVal,String newVal) {
-						if(!newVal.isEmpty()){
-							if(_model.addNewRemoteServer(newVal)){
-								MenuItem item = new MenuItem(newVal);
-								_screen.getRemoteServers().add(item);
-								_dirtyFlag = true;
-								item.fire();
-							}else{
-								//Item already exists
-								for(MenuItem menuItem :_screen.getRemoteServers()){
-									if(menuItem.getText().equals(newVal)){
-										menuItem.fire();
-										break;
-									}
-								}
-							}
-							
-						}
-					}
-				});
-			}
-		});
+//		_screen.onRunOnOther().set(new EventHandler<ActionEvent>() {
+//			@Override
+//			public void handle(ActionEvent event) {
+//				RemoteServerWizard wizard = new RemoteServerWizard();
+//				ObjectProperty<String> selection = wizard.show(_screen.getParent().getScene().getWindow());
+//				selection.addListener(new ChangeListener<String>(){
+//					@Override
+//					public void changed(ObservableValue<? extends String> arg0, String oldVal,String newVal) {
+//						if(!newVal.isEmpty()){
+//							if(_model.addNewRemoteServer(newVal)){
+//								MenuItem item = new MenuItem(newVal);
+//								_screen.getRemoteServers().add(item);
+//								_dirtyFlag = true;
+//								item.fire();
+//							}else{
+//								//Item already exists
+//								for(MenuItem menuItem :_screen.getRemoteServers()){
+//									if(menuItem.getText().equals(newVal)){
+//										menuItem.fire();
+//										break;
+//									}
+//								}
+//							}
+//							
+//						}
+//					}
+//				});
+//			}
+//		});
 		
 		_screen.onSelectWorkspace().set(new EventHandler<ActionEvent>(){
 
@@ -439,8 +497,11 @@ public class CyclistController {
 			public void handle(ActionEvent arg0) {
 				
 				//If need to save the current workspace data - ask the user whether to save it or not
-				
-				if(_dirtyFlag || _presenter.getDirtyFlag()){
+				boolean dirty = _dirtyFlag;
+				for (Perspective p : _perspectives) {
+					dirty |= p.presenter.getDirtyFlag();
+				}
+				if (dirty) {
 					SaveWsWizard wizard = new SaveWsWizard();
 					ObjectProperty<Boolean> selection = wizard.show(_screen.getParent().getScene().getWindow());
 					selection.addListener(new ChangeListener<Boolean>(){
@@ -476,7 +537,7 @@ public class CyclistController {
 				File dir = new File(getLastChosenWorkDirectory());
 				String parent="";
 				if(!dir.exists()){
-					parent = WorkDirectoryController.DEFAULT_WORKSPACE;
+					parent = SessionController.DEFAULT_WORKSPACE;
 				}else{
 					parent = dir.getParent();
 				}
@@ -487,7 +548,7 @@ public class CyclistController {
 				if (file != null) {
 					saveAs(file.getAbsolutePath());
 					//Display the new directory in the work directories dialog.
-					_workDirectoryController.addNewDir(file.getAbsolutePath());
+					_sessionController.addNewDir(file.getAbsolutePath());
 				}
 			}
 		});
@@ -563,42 +624,43 @@ public class CyclistController {
 				quit();
 			}
 		});
-		;
+		
 		EventHandler<ActionEvent> viewAction = new EventHandler<ActionEvent>() {		
 			@Override
 			public void handle(ActionEvent event) {
 				MenuItem item = (MenuItem) event.getSource();
-				for (ToolFactory factory : 	ToolsLibrary.factories) {
-					if (factory.getToolName().equals(item.getText())) {
-						try {
-							_presenter.addTool(factory.create());
-						} catch (Exception e) {
-							e.printStackTrace();
-						}
-					}
+				try {
+					ToolFactory factory = ToolsLibrary.getFactory(item.getText());
+					_presenter.addTool(factory.create());
+				} catch (Exception e) {
+					log.error("Internal error: Can't find tool "+item.getText());
 				}
 			}
 		};
 		
-		for (MenuItem item : _screen.getViewMenu().getItems()) {
+		for (MenuItem item : _screen.getToolsMenu().getItems()) {
 			item.setOnAction(viewAction);
 		}
 		
 		_model.getSimulations().addListener(new ListChangeListener<Simulation>() {
 			@Override
 			public void onChanged(ListChangeListener.Change<? extends Simulation> listChange) {
-				while (listChange.next()) {
-					for(Simulation sim : listChange.getRemoved()){
-						_presenter.removeSimulation(sim);
-						_model.markSimALiasAsRemoved(sim);
-					}
-					boolean select = true;
-					for(Simulation sim : listChange.getAddedSubList()){
-						_model.addNewSimALias(sim,"");
-						//If there are a few simulations added at the same time - select only the first.
-						_presenter.addFirstSelectedSimulation(sim,select);
-						if(select){
-							select = false;
+				if (_presenter instanceof VisWorkspacePresenter) {
+					VisWorkspacePresenter p = (VisWorkspacePresenter) _presenter;
+	
+					while (listChange.next()) {
+						for(Simulation sim : listChange.getRemoved()){
+							p.removeSimulation(sim);
+							_model.markSimALiasAsRemoved(sim);
+						}
+						boolean select = true;
+						for(Simulation sim : listChange.getAddedSubList()){
+							_model.addNewSimALias(sim,"");
+							//If there are a few simulations added at the same time - select only the first.
+							p.addFirstSelectedSimulation(sim,select);
+							if(select){
+								select = false;
+							}
 						}
 					}
 				}
@@ -609,7 +671,14 @@ public class CyclistController {
 	
 		
 	private void quit() {
-		if(_dirtyFlag || _presenter.getDirtyFlag()){
+		_currentPerspective.setToolsPositions(_screen.getToolsPositions());
+		
+		boolean dirty = _dirtyFlag || Preferences.getInstance().isDirty();
+		for (Perspective p : _perspectives) {
+			dirty |= p.presenter.getDirtyFlag();
+		}
+		
+		if(dirty){
 			SaveWsWizard wizard = new SaveWsWizard();
 			ObjectProperty<Boolean> selection = wizard.show(_screen.getParent().getScene().getWindow());
 			selection.addListener(new ChangeListener<Boolean>(){
@@ -631,6 +700,8 @@ public class CyclistController {
 	}
 	
 	private void saveAs(String workdir) {
+		
+		_currentPerspective.setToolsPositions(_screen.getToolsPositions());
 		
 		IMemento child;
 		File saveDir = new File(workdir);
@@ -679,11 +750,15 @@ public class CyclistController {
 		Preferences.getInstance().save(memento.createChild("Preferences"));
 		
 		//Save the remote servers
-		saveRemoteServers(memento);
+//		saveRemoteServers(memento);
 		
 		_cyclusService.save(memento.createChild("Jobs"));
 		
-		_presenter.save(memento.createChild("workspace"));
+		IMemento perspectives_memento = memento.createChild("Perspectives");
+		perspectives_memento.putInteger("current", _currentPerspective.id);
+		for (Perspective p : _perspectives) {
+			p.save(perspectives_memento.createChild("Perspective"));
+		}
 		
 		//First save the main workspace
 		IMemento mainWs = memento.createChild("main-window");	
@@ -703,7 +778,7 @@ public class CyclistController {
 	
 	private void restore() {
 	
-		String currDirectory = _workDirectoryController.getWorkDirectories().get(_workDirectoryController.getLastChosenIndex());
+		String currDirectory = _sessionController.getWorkDirectories().get(_sessionController.getLastChosenIndex());
 		
 		// Check if the save file exists
 		File saveFile = new File(currDirectory+"/"+SAVE_FILE);
@@ -712,9 +787,11 @@ public class CyclistController {
 		clearModel();
 		
 		//Clears the main workspace.
-		_presenter.clearWorkspace();
+		for(Perspective p : _perspectives) {
+			p.presenter.clearWorkspace();
+		}
 		
-		_screen.getRemoteServers().clear();
+//		_screen.getRemoteServers().clear();
 			
 		Context ctx = new Context();
 		readSimulationsTables(ctx);
@@ -777,8 +854,8 @@ public class CyclistController {
 					//Read the preferences.
 					Preferences.getInstance().restore(memento.getChild("Preferences"));
 					
-					//Read the remote servers
-					restoreRemoteServers(memento);
+//					//Read the remote servers
+//					restoreRemoteServers(memento);
 					
 					_cyclusService.restore(memento.getChild("Jobs"));
 					
@@ -789,20 +866,38 @@ public class CyclistController {
 					restoreMainScreen(mainWs.getChild("geom"));
 					_screen.restore(mainWs, ctx);
 					
-					IMemento toolsRoot = memento.getChild("workspace");
-					if(toolsRoot != null){
-						_presenter.restore(toolsRoot, ctx);
+					 
+					IMemento p_memento = memento.getChild("Perspectives");
+					if (p_memento != null) {
+						for (IMemento child : p_memento.getChildren("Perspective")) {
+							Perspective p = _perspectives[child.getInteger("id")];
+							p.restore(child, ctx);
+						}
+	
+						int i = 0;
+						try {
+							i = p_memento.getInteger("current");
+						} catch(Exception e) {
+							// ignore
+						}
+						_currentPerspective= _perspectives[i];
+					} else {
+						_currentPerspective= _perspectives[0];
+						if (memento.getChild("workspace") != null) {
+							_perspectives[0].restore(memento, ctx);
+						}
 					}
 								
 				} catch (Exception e) {
 					log.error("Error during restore: "+e.getMessage());
-					e.printStackTrace();
 				}
 			} catch (FileNotFoundException e) {
 				log.error("Error during restore: "+e.getMessage());
-				e.printStackTrace();
 			} 		
 		}
+		
+		if (_currentPerspective == null) 
+			_currentPerspective = _perspectives[0];
 	}
 	
 	/*
@@ -812,23 +907,25 @@ public class CyclistController {
 	 */
 	private void readSimulationsTables(Context ctx){
 		try {
-			InputStream in = Cyclist.class.getResourceAsStream(SIMULATIONS_TABLES_FILE);
-			File simulationsFile = StreamUtils.stream2file(in);
-			if(simulationsFile.exists()){
-				Reader reader = new FileReader(simulationsFile);
-				XMLMemento memento = XMLMemento.createReadRoot(reader);
-				
-				// Restore tables
-				for(IMemento node: memento.getChildren("Table")){
-					Table table = new Table();
-					table.restoreSimulated(node, ctx);
-					table.setLocalDatafile(getLastChosenWorkDirectory());
-					_model.getSimulationsTablesDef().add(table);
-					_model.getTables().add(table);	
-				}
+			Path path = FileSystems.getDefault().getPath(SessionController.CYCLIST_DIR, SIMULATIONS_TABLES_FILE);
+			if (!Files.exists(path)) {
+				InputStream in = Cyclist.class.getResourceAsStream("assets/"+SIMULATIONS_TABLES_FILE);
+				Files.copy(in, path);
+			}
+			File simulationsFile = path.toFile();
+			Reader reader = new FileReader(simulationsFile);
+			XMLMemento memento = XMLMemento.createReadRoot(reader);
+			
+			// Restore tables
+			for(IMemento node: memento.getChildren("Table")){
+				Table table = new Table();
+				table.restoreSimulated(node, ctx);
+				table.setLocalDatafile(getLastChosenWorkDirectory());
+				_model.getSimulationsTablesDef().add(table);
+				_model.getTables().add(table);	
 			}
 		} catch (Exception e) {
-			log.info("Exception " + e.getMessage());
+			log.error(e.getMessage());
 		}
 	}
 	
@@ -837,10 +934,10 @@ public class CyclistController {
 	 * If not available - return the default work directory
 	 */
 	private String getLastChosenWorkDirectory(){
-		if(_workDirectoryController == null){
-			return WorkDirectoryController.CYCLIST_DIR;
+		if(_sessionController == null){
+			return SessionController.CYCLIST_DIR;
 		}
-		return _workDirectoryController.getWorkDirectories().get(_workDirectoryController.getLastChosenIndex());
+		return _sessionController.getWorkDirectories().get(_sessionController.getLastChosenIndex());
 	}
 	
 	/*
@@ -880,40 +977,40 @@ public class CyclistController {
 		_model.getTables().clear();
 		_model.getSimulations().clear();
 		_model.setSelectedDatasource(null);
-		_model.getRemoteServersList().clear();
+//		_model.getRemoteServersList().clear();
 	}
 	
 	/*
 	 * Saves the list of remote servers from the model.
 	 * @param IMemento memento
 	 */
-	private void saveRemoteServers(IMemento memento){
-		IMemento remotes = memento.createChild("remote-servers");
-		for(String remote : _model.getRemoteServersList()){
-			IMemento server = remotes.createChild("Server");
-			server.putString("address", remote);
-		}
-	}
+//	private void saveRemoteServers(IMemento memento){
+//		IMemento remotes = memento.createChild("remote-servers");
+//		for(String remote : _model.getRemoteServersList()){
+//			IMemento server = remotes.createChild("Server");
+//			server.putString("address", remote);
+//		}
+//	}
 	
 	/*
 	 * Restores the list of remote servers.
 	 * Adds the list to the model and creates corresponding menu items in the main screen menu.
 	 * @param IMemento memento.
 	 */
-	private void restoreRemoteServers(IMemento memento){
-		IMemento remotesTitle = memento.getChild("remote-servers");
-		if(remotesTitle != null){
-			IMemento[] servers = remotesTitle.getChildren("Server");
-			if(servers != null){
-				for(IMemento server : servers){
-					String address = server.getString("address");
-					_model.addNewRemoteServer(address);
-					MenuItem item = new MenuItem(address);
-					_screen.getRemoteServers().add(item);
-				}
-			}
-		}
-	}
+//	private void restoreRemoteServers(IMemento memento){
+//		IMemento remotesTitle = memento.getChild("remote-servers");
+//		if(remotesTitle != null){
+//			IMemento[] servers = remotesTitle.getChildren("Server");
+//			if(servers != null){
+//				for(IMemento server : servers){
+//					String address = server.getString("address");
+//					_model.addNewRemoteServer(address);
+//					MenuItem item = new MenuItem(address);
+//					_screen.getRemoteServers().add(item);
+//				}
+//			}
+//		}
+//	}
 	
 	
 	

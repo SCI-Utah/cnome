@@ -7,7 +7,7 @@ Cyclist is a visual interface companion for the Cyclus project. It provides an i
 ### Dependencies:
 | package | version | download
 | ------- | ------- | --------
-| Java    | 8.0     | https://jdk8.java.net/download.html
+| Java    | 8.0_25  | http://www.oracle.com/technetwork/java/javase/downloads/index-jsp-138363.html
 | JavaFX  | 8.0     | (JavaFX is part of Java 8)
 | Ant     | 1.9+    | http://ant.apache.org/bindownload.cgi
 

@@ -126,7 +126,7 @@ public class QueryBuilder {
 			builder.append(SQL.getFunction(field.getString(FieldProperties.AGGREGATION_FUNC)).format(field.getName()));
 		}
 		
-		append(builder, first, _grouping);
+		first = append(builder, first, _grouping);
 		
 		if (first) {
 			// no projection -> use '*'
